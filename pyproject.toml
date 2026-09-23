@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "hurst>=0.0.5",
     "matplotlib>=3.11.2",
     "numpy>=2.5.3",
     "pandas>=3.0.6",
     "seaborn>=0.13.2",
+    "statsmodels>=0.15.0",
     "yfinance>=1.7.0",
 ]
