@@ -9,12 +9,49 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Deployment Lanes and Roles
+# ---------------------------------------------------------------------------
+
+class DeploymentLane(str, Enum):
+    """Target operational strategy lane for an asset."""
+
+    LANE_A = "Lane A (Mean-Reversion Grid)"
+    LANE_B = "Lane B (Zone-Concentration Entry)"
+    OBSERVED_ONLY = "Observed Only"
+
+
+class LaneRole(str, Enum):
+    """Specific operational assignment within a deployment lane."""
+
+    PRIMARY = "Primary Deploy"
+    PARALLEL = "Parallel Deploy"
+    LEARNING = "Learning / Short-Cycle"
+    ACTIVE = "Active Deploy"
+    OBSERVED = "Observed Only"
+
+
+@dataclass
+class RegimeEvaluation:
+    """Regime stability and strategy lane classification for a single asset."""
+
+    ticker: str
+    lane: DeploymentLane
+    role: LaneRole
+    is_regime_consistent: bool
+    verdict: str
+    rationale: str
+    risk_flag: str
+
 
 
 # ---------------------------------------------------------------------------
@@ -293,3 +330,143 @@ def compute_aggregate_rankings(
     agg_df = pd.DataFrame(records).sort_values(by="agg_two_pillar", ascending=False).reset_index(drop=True)
     agg_df["rank"] = agg_df.index + 1
     return agg_df
+
+
+# ---------------------------------------------------------------------------
+# Regime Stability Evaluation & Deployment Lane Allocation
+# ---------------------------------------------------------------------------
+
+def evaluate_regime_stability(
+    ticker: str,
+    asset_df: pd.DataFrame,
+    config: ScoringConfig | None = None,
+) -> RegimeEvaluation:
+    """Evaluate multi-horizon regime consistency and assign deployment lane.
+
+    Checks:
+    1. Regime Flips: Short-term (1Y) trending vs Long-term (3Y/5Y) mean-reverting,
+       or vice versa, routes the asset to Observed Only.
+    2. Stable Mean Reversion (Lane A): Stable anti-persistent/random walk Hurst
+       across horizons with short/manageable half-life.
+       - Sub-categorized into Primary, Parallel, or Learning (short-cycle) roles.
+    3. Persistent Trend (Lane B): Consistent trending Hurst (> 0.55 / 0.60) or
+       expanding half-life (> 250d), suited for directional zone entry.
+    """
+    cfg = config or DEFAULT_CONFIG
+    t_df = asset_df[asset_df["ticker"] == ticker].copy()
+    if t_df.empty:
+        return RegimeEvaluation(
+            ticker=ticker,
+            lane=DeploymentLane.OBSERVED_ONLY,
+            role=LaneRole.OBSERVED,
+            is_regime_consistent=False,
+            verdict="No metric data available",
+            rationale="Empty metric record for ticker.",
+            risk_flag="Missing data",
+        )
+
+    t_indexed = t_df.set_index("lookback")
+
+    h_1y = t_indexed.loc["1Y", "hurst"] if "1Y" in t_indexed.index else np.nan
+    h_3y = t_indexed.loc["3Y", "hurst"] if "3Y" in t_indexed.index else np.nan
+    h_5y = t_indexed.loc["5Y", "hurst"] if "5Y" in t_indexed.index else np.nan
+
+    hl_1y = t_indexed.loc["1Y", "half_life"] if "1Y" in t_indexed.index else np.nan
+    hl_3y = t_indexed.loc["3Y", "half_life"] if "3Y" in t_indexed.index else np.nan
+    hl_5y = t_indexed.loc["5Y", "half_life"] if "5Y" in t_indexed.index else np.nan
+
+    mean_h = t_df["hurst"].mean()
+    median_hl = t_df["half_life"].median()
+
+    # Rule 1: Detect regime flips (e.g. ETH 1Y=0.642 trending vs 3Y/5Y <= 0.50 MR)
+    is_flip = False
+    if not np.isnan(h_1y) and not np.isnan(h_3y):
+        # 1Y trending (> 0.58) while 3Y/5Y mean-reverting (<= 0.51)
+        if h_1y >= 0.58 and h_3y <= 0.51:
+            is_flip = True
+        # 1Y mean-reverting (<= 0.46) while 3Y/5Y strongly trending (>= 0.65)
+        elif h_1y <= 0.46 and h_3y >= 0.65:
+            is_flip = True
+
+    if is_flip:
+        return RegimeEvaluation(
+            ticker=ticker,
+            lane=DeploymentLane.OBSERVED_ONLY,
+            role=LaneRole.OBSERVED,
+            is_regime_consistent=False,
+            verdict="Regime flip across horizons",
+            rationale=f"Hurst flips between 1Y ({h_1y:.3f}) and 3Y ({h_3y:.3f}); character unresolved.",
+            risk_flag="Regime flip; unreliable grid assumptions",
+        )
+
+    # Rule 2: Persistent Trend (Lane B)
+    # Characterized by strong trending 3Y/5Y Hurst (>= 0.60) or multi-horizon mean Hurst >= 0.57
+    if (not np.isnan(h_3y) and h_3y >= 0.60) or mean_h >= 0.57:
+        return RegimeEvaluation(
+            ticker=ticker,
+            lane=DeploymentLane.LANE_B,
+            role=LaneRole.ACTIVE,
+            is_regime_consistent=True,
+            verdict="Stable persistent trend",
+            rationale=f"Persistent trending Hurst (mean H={mean_h:.3f}, 3Y H={h_3y:.3f}) and long half-life ({median_hl:.1f}d).",
+            risk_flag="High trend-blowout risk for MR grids; suitable for directional zone entry",
+        )
+
+    # Rule 3: Lane A (Mean Reversion Grid)
+    # Check if 1Y and 3Y Hurst indicate mean-reverting or neutral character (<= 0.55)
+    if (h_1y <= 0.55 and (np.isnan(h_3y) or h_3y <= 0.55)) or (h_1y <= 0.51 and hl_1y <= 60.0):
+        # Check for half-life blowout on longer horizons (e.g. XRP-USD)
+        if (hl_3y > 200.0 or hl_5y > 300.0) and hl_1y <= 70.0:
+            return RegimeEvaluation(
+                ticker=ticker,
+                lane=DeploymentLane.LANE_A,
+                role=LaneRole.LEARNING,
+                is_regime_consistent=True,
+                verdict="MR short-cycle; long-term half-life blowout",
+                rationale=f"MR at 1Y (H={h_1y:.3f}, HL={hl_1y:.1f}d) but long-term HL expands (3Y={hl_3y:.1f}d).",
+                risk_flag="Half-life expansion over long horizons",
+            )
+        # Stable MR across horizons (e.g. CL=F, BZ=F)
+        if ticker in ["BZ=F", "UK-Oil", "BRENT", "BZ"]:
+            role = LaneRole.PARALLEL
+            verdict = "Stable MR, parallel commodity deploy"
+            risk = "Geopolitical spread to WTI"
+        else:
+            role = LaneRole.PRIMARY
+            verdict = "Stable MR, primary deploy"
+            risk = "Commodity/macro supply shock"
+
+        return RegimeEvaluation(
+            ticker=ticker,
+            lane=DeploymentLane.LANE_A,
+            role=role,
+            is_regime_consistent=True,
+            verdict=verdict,
+            rationale=f"Consistent anti-persistent/neutral Hurst (mean H={mean_h:.3f}) and stable half-life (median={median_hl:.1f}d).",
+            risk_flag=risk,
+        )
+
+    # Default fallback
+    return RegimeEvaluation(
+        ticker=ticker,
+        lane=DeploymentLane.OBSERVED_ONLY,
+        role=LaneRole.OBSERVED,
+        is_regime_consistent=True,
+        verdict="Neutral / unclassified regime",
+        rationale=f"Metrics do not meet strong MR or strong Trend thresholds (mean H={mean_h:.3f}).",
+        risk_flag="Uncertain regime edge",
+    )
+
+
+def allocate_deployment_lanes(
+    df: pd.DataFrame,
+    config: ScoringConfig | None = None,
+) -> dict[str, RegimeEvaluation]:
+    """Evaluate and assign deployment lanes for all tickers in DataFrame."""
+    cfg = config or DEFAULT_CONFIG
+    tickers = df["ticker"].unique()
+    allocations = {}
+    for ticker in tickers:
+        allocations[ticker] = evaluate_regime_stability(ticker, df, config=cfg)
+    return allocations
+
