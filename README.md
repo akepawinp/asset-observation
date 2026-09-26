@@ -1,6 +1,6 @@
-# Asset Observation
+# Mean Reversion for Grid Trading
 
-Quantitative Asset Observation & Mean-Reversion Grid Screening Pipeline.
+Quantitative Mean-Reversion Analysis & Asset Screening Pipeline for Grid Trading.
 
 Downloads, processes, evaluates, and allocates candidate assets into operational strategy lanes (Lane A Mean-Reversion Grid, Lane B Zone-Concentration Entry, or Observed-Only) using statistical memory estimation and Two-Pillar Multiplicative Composite Grid Scoring.
 
@@ -11,7 +11,7 @@ Downloads, processes, evaluates, and allocates candidate assets into operational
 - **Two-Pillar Multiplicative Scoring**: Multiplicative volatility-gating scoring model prioritizing oscillating assets and penalizing runaway trends.
 - **Multi-Horizon Regime Stability Analysis**: Cross-lookback (1Y, 3Y, 5Y) consistency evaluation detecting regime flips.
 - **Operational Strategy Lane Allocation**: Deterministic routing into Lane A, Lane B, or Observed-Only.
-- **Unified CLI & Reporting**: CLI runner with rich stdout tables, CSV outputs, and Markdown reports.
+- **Unified CLI & Reporting**: CLI runner with rich stdout tables, CSV outputs, JSON exports, and Markdown reports.
 
 ## Installation
 
@@ -37,6 +37,9 @@ uv run python main.py run
 
 # Run with fresh Yahoo Finance download before analysis
 uv run python main.py run --fetch
+
+# Run with machine-readable JSON exports alongside CSVs
+uv run python main.py run --json
 
 # Run with custom scoring weights (e.g. 60% Hurst, 30% Half-Life, 10% ADF)
 uv run python main.py run --w-hurst 0.60 --w-half-life 0.30 --w-adf 0.10
@@ -89,7 +92,8 @@ config = PipelineConfig(
         w_half_life=0.35,
         w_adf=0.15,
         ref_sd=0.03,
-    )
+    ),
+    export_json=True,
 )
 result = run_pipeline(config)
 

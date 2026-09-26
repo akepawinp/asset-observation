@@ -1,6 +1,6 @@
-# Domain Context
+# Domain Context: Mean Reversion for Grid Trading
 
-Glossary and ubiquitous language for asset observation, quantitative analysis, and trading research.
+Glossary and ubiquitous language for quantitative mean-reversion analysis, asset screening, and grid trading research.
 
 ## Terms
 

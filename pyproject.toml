@@ -1,7 +1,7 @@
 [project]
-name = "asset-observation"
+name = "mean-reversion-grid-trading"
 version = "0.1.0"
-description = "Quantitative Asset Observation & Mean-Reversion Grid Screening Pipeline"
+description = "Quantitative Mean-Reversion Analysis & Screening Pipeline for Grid Trading"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,4 +15,5 @@ dependencies = [
 ]
 
 [project.scripts]
-asset-observation = "src.cli:main"
+mean-reversion-grid-trading = "src.cli:main"
+mr-grid = "src.cli:main"

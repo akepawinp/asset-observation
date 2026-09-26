@@ -305,8 +305,8 @@ def _add_scoring_weight_arguments(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the unified command-line parser with subcommands."""
     parser = argparse.ArgumentParser(
-        prog="asset-observation",
-        description="Quantitative Asset Observation & Mean-Reversion Grid Screening CLI.",
+        prog="mean-reversion-grid-trading",
+        description="Quantitative Mean-Reversion Analysis & Grid Trading Asset Screening CLI.",
     )
     parser.add_argument(
         "--verbose",
