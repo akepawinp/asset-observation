@@ -308,11 +308,25 @@ def compute_aggregate_rankings(
     tickers = scored_df["ticker"].unique()
     for t in tickers:
         t_df = scored_df[scored_df["ticker"] == t].set_index("lookback")
-        if not all(lb in t_df.index for lb in weights):
+        available_lbs = [lb for lb in weights if lb in t_df.index]
+        if not available_lbs:
             continue
-        agg_two_pillar = sum(t_df.loc[lb, "score_two_pillar"] * w for lb, w in weights.items())
-        agg_additive = sum(t_df.loc[lb, "score_additive"] * w for lb, w in weights.items())
-        agg_q_mr = sum(t_df.loc[lb, "q_mr"] * w for lb, w in weights.items())
+        total_avail_weight = sum(weights[lb] for lb in available_lbs)
+        if total_avail_weight <= 0:
+            continue
+
+        agg_two_pillar = sum(
+            t_df.loc[lb, "score_two_pillar"] * (weights[lb] / total_avail_weight)
+            for lb in available_lbs
+        )
+        agg_additive = sum(
+            t_df.loc[lb, "score_additive"] * (weights[lb] / total_avail_weight)
+            for lb in available_lbs
+        )
+        agg_q_mr = sum(
+            t_df.loc[lb, "q_mr"] * (weights[lb] / total_avail_weight)
+            for lb in available_lbs
+        )
         mean_daily_sd = t_df["daily_sd"].mean()
         mean_hurst = t_df["hurst"].mean()
         mean_hl = t_df["half_life"].median()
@@ -326,6 +340,20 @@ def compute_aggregate_rankings(
             "mean_hurst": mean_hurst,
             "median_half_life": mean_hl,
         })
+
+    if not records:
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "agg_two_pillar",
+                "agg_additive",
+                "agg_q_mr",
+                "mean_daily_sd",
+                "mean_hurst",
+                "median_half_life",
+                "rank",
+            ]
+        )
 
     agg_df = pd.DataFrame(records).sort_values(by="agg_two_pillar", ascending=False).reset_index(drop=True)
     agg_df["rank"] = agg_df.index + 1
