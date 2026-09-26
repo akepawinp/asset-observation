@@ -1,7 +1,7 @@
 [project]
 name = "asset-observation"
 version = "0.1.0"
-description = "Add your description here"
+description = "Quantitative Asset Observation & Mean-Reversion Grid Screening Pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,3 +13,6 @@ dependencies = [
     "statsmodels>=0.15.0",
     "yfinance>=1.7.0",
 ]
+
+[project.scripts]
+asset-observation = "src.cli:main"
