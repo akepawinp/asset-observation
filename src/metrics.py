@@ -11,7 +11,8 @@ Implements the methods selected in the statistical estimation survey
 from __future__ import annotations
 
 import logging
-from typing import NamedTuple
+from pathlib import Path
+from typing import NamedTuple, Sequence
 
 import numpy as np
 import pandas as pd
@@ -37,6 +38,17 @@ class MetricResult(NamedTuple):
     half_life: float  # days; inf when β ≥ 0
     adf_stat: float
     adf_pvalue: float
+
+
+# ---------------------------------------------------------------------------
+# Value Formatting Utilities
+# ---------------------------------------------------------------------------
+
+def format_half_life(hl: float) -> str:
+    """Format half-life duration into readable string representation."""
+    if np.isnan(hl) or np.isinf(hl) or hl > 9999 or hl <= 0:
+        return "∞"
+    return f"{hl:.1f}d"
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +144,7 @@ def _asset_class(ticker: str) -> str:
 def _calendar_days_for_lookback(lookback: str) -> int:
     """Approximate calendar days for a lookback label."""
     mapping = {"1Y": 365, "3Y": 3 * 365, "5Y": 5 * 365}
-    return mapping[lookback]
+    return mapping.get(lookback, 365)
 
 
 def slice_lookback(df: pd.DataFrame, lookback: str) -> pd.DataFrame:
@@ -174,21 +186,32 @@ def compute_metric_row(ticker: str, prices: pd.Series, lookback: str) -> MetricR
     )
 
 
-def compute_all(data_dir: str = "data") -> pd.DataFrame:
-    """Compute the full metric matrix for all 7 assets × 3 lookbacks.
+def compute_all(
+    tickers: Sequence[str] | None = None,
+    lookbacks: Sequence[str] | None = None,
+    data_dir: str | Path = "data",
+) -> pd.DataFrame:
+    """Compute the metric matrix across specified tickers and lookbacks.
 
     Returns a DataFrame with one row per (ticker, lookback).
     """
     from src.downloader import load_ticker_data
 
+    target_tickers = tickers if tickers is not None else CANDIDATE_TICKERS
+    target_lookbacks = lookbacks if lookbacks is not None else LOOKBACKS
+
     rows: list[MetricResult] = []
-    for ticker in CANDIDATE_TICKERS:
-        df = load_ticker_data(ticker, data_dir=data_dir)
-        close = df["Close"]
-        for lb in LOOKBACKS:
+    for ticker in target_tickers:
+        try:
+            df = load_ticker_data(ticker, data_dir=data_dir)
+        except Exception as exc:
+            logger.warning("Failed to load data for ticker %s: %s", ticker, exc)
+            continue
+
+        for lb in target_lookbacks:
             window = slice_lookback(df, lb)
-            if window.empty:
-                logger.warning("No data for %s at lookback %s — skipping", ticker, lb)
+            if window.empty or len(window) < 10:
+                logger.warning("Insufficient data for %s at lookback %s — skipping", ticker, lb)
                 continue
             row = compute_metric_row(ticker, window["Close"], lb)
             rows.append(row)
@@ -197,5 +220,4 @@ def compute_all(data_dir: str = "data") -> pd.DataFrame:
                 ticker, lb, row.daily_sd, row.annual_sd, row.hurst, row.half_life, row.adf_pvalue,
             )
 
-    result_df = pd.DataFrame(rows)
-    return result_df
+    return pd.DataFrame(rows)

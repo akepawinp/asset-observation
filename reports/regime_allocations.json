@@ -1,0 +1,65 @@
+{
+  "BTC-USD": {
+    "ticker": "BTC-USD",
+    "lane": "Lane B (Zone-Concentration Entry)",
+    "role": "Active Deploy",
+    "is_regime_consistent": true,
+    "verdict": "Stable persistent trend",
+    "rationale": "Persistent trending Hurst (mean H=0.613, 3Y H=0.634) and long half-life (102.7d).",
+    "risk_flag": "High trend-blowout risk for MR grids; suitable for directional zone entry"
+  },
+  "ETH-USD": {
+    "ticker": "ETH-USD",
+    "lane": "Observed Only",
+    "role": "Observed Only",
+    "is_regime_consistent": false,
+    "verdict": "Regime flip across horizons",
+    "rationale": "Hurst flips between 1Y (0.642) and 3Y (0.497); character unresolved.",
+    "risk_flag": "Regime flip; unreliable grid assumptions"
+  },
+  "XRP-USD": {
+    "ticker": "XRP-USD",
+    "lane": "Lane A (Mean-Reversion Grid)",
+    "role": "Learning / Short-Cycle",
+    "is_regime_consistent": true,
+    "verdict": "MR short-cycle; long-term half-life blowout",
+    "rationale": "MR at 1Y (H=0.499, HL=50.2d) but long-term HL expands (3Y=273.5d).",
+    "risk_flag": "Half-life expansion over long horizons"
+  },
+  "GC=F": {
+    "ticker": "GC=F",
+    "lane": "Lane B (Zone-Concentration Entry)",
+    "role": "Active Deploy",
+    "is_regime_consistent": true,
+    "verdict": "Stable persistent trend",
+    "rationale": "Persistent trending Hurst (mean H=0.634, 3Y H=0.732) and long half-life (379.3d).",
+    "risk_flag": "High trend-blowout risk for MR grids; suitable for directional zone entry"
+  },
+  "SI=F": {
+    "ticker": "SI=F",
+    "lane": "Lane B (Zone-Concentration Entry)",
+    "role": "Active Deploy",
+    "is_regime_consistent": true,
+    "verdict": "Stable persistent trend",
+    "rationale": "Persistent trending Hurst (mean H=0.633, 3Y H=0.693) and long half-life (289.1d).",
+    "risk_flag": "High trend-blowout risk for MR grids; suitable for directional zone entry"
+  },
+  "CL=F": {
+    "ticker": "CL=F",
+    "lane": "Lane A (Mean-Reversion Grid)",
+    "role": "Primary Deploy",
+    "is_regime_consistent": true,
+    "verdict": "Stable MR, primary deploy",
+    "rationale": "Consistent anti-persistent/neutral Hurst (mean H=0.491) and stable half-life (median=53.8d).",
+    "risk_flag": "Commodity/macro supply shock"
+  },
+  "BZ=F": {
+    "ticker": "BZ=F",
+    "lane": "Lane A (Mean-Reversion Grid)",
+    "role": "Parallel Deploy",
+    "is_regime_consistent": true,
+    "verdict": "Stable MR, parallel commodity deploy",
+    "rationale": "Consistent anti-persistent/neutral Hurst (mean H=0.491) and stable half-life (median=53.2d).",
+    "risk_flag": "Geopolitical spread to WTI"
+  }
+}

@@ -6,26 +6,27 @@ Orchestrates the quantitative asset selection workflow:
 3. Evaluate Two-Pillar Multiplicative and benchmark scoring models.
 4. Calculate multi-horizon aggregate scores and rankings.
 5. Classify regime stability and allocate candidate assets into operational strategy lanes.
-6. Export structured CSV files and human-readable Markdown summary reports.
+6. Export structured CSV/JSON files and human-readable Markdown summary reports.
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
-from src.downloader import fetch_and_save_tickers, load_ticker_data
+from src.downloader import fetch_and_save_tickers
 from src.metrics import (
     CANDIDATE_TICKERS,
     LOOKBACKS,
-    compute_metric_row,
-    slice_lookback,
+    compute_all,
+    format_half_life,
 )
 from src.scoring import (
     DEFAULT_CONFIG,
@@ -54,9 +55,11 @@ class PipelineConfig:
     end_date: str | None = None
     force_full_download: bool = False
     generate_markdown: bool = True
+    export_json: bool = False
     metric_matrix_filename: str = "metric_matrix.csv"
     candidate_scores_filename: str = "candidate_scores.csv"
     aggregate_rankings_filename: str = "aggregate_rankings.csv"
+    allocations_filename: str = "regime_allocations.json"
     report_filename: str = "final_asset_selection_report.md"
 
 
@@ -77,27 +80,8 @@ def compute_pipeline_metrics(
     lookbacks: Sequence[str],
     data_dir: str | Path = "data",
 ) -> pd.DataFrame:
-    """Compute the multi-horizon metric matrix for specified tickers."""
-    rows = []
-    for ticker in tickers:
-        try:
-            df = load_ticker_data(ticker, data_dir=data_dir)
-        except Exception as exc:
-            logger.warning("Failed to load data for ticker %s: %s", ticker, exc)
-            continue
-
-        for lb in lookbacks:
-            window = slice_lookback(df, lb)
-            if window.empty or len(window) < 10:
-                logger.warning("Insufficient data for %s at lookback %s", ticker, lb)
-                continue
-            row = compute_metric_row(ticker, window["Close"], lb)
-            rows.append(row)
-
-    if not rows:
-        return pd.DataFrame()
-
-    return pd.DataFrame(rows)
+    """Compute the multi-horizon metric matrix for specified tickers and lookbacks."""
+    return compute_all(tickers=tickers, lookbacks=lookbacks, data_dir=data_dir)
 
 
 def generate_markdown_report(
@@ -166,7 +150,7 @@ def generate_markdown_report(
     ]
 
     for _, row in metric_matrix_df.iterrows():
-        hl_str = "∞" if (np.isinf(row["half_life"]) or row["half_life"] > 9999) else f"{row['half_life']:.1f}d"
+        hl_str = format_half_life(row["half_life"])
         lines.append(
             f"| {row['ticker']} | {row['lookback']} | {row['daily_sd'] * 100:.2f}% | "
             f"{row['annual_sd'] * 100:.1f}% | {row['hurst']:.3f} | {hl_str} | {row['adf_pvalue']:.3f} |"
@@ -190,7 +174,7 @@ def generate_markdown_report(
             by="score_two_pillar", ascending=False
         ).reset_index(drop=True)
         for rank, (_, r) in enumerate(lb_df.iterrows(), start=1):
-            hl_str = "∞" if (np.isinf(r["half_life"]) or r["half_life"] > 9999) else f"{r['half_life']:.1f}d"
+            hl_str = format_half_life(r["half_life"])
             lines.append(
                 f"| {rank} | {r['ticker']} | {r['daily_sd'] * 100:.2f}% | {r['hurst']:.3f} | "
                 f"{hl_str} | {r['q_mr']:.3f} | {r['score_two_pillar']:.1f} |"
@@ -207,7 +191,7 @@ def generate_markdown_report(
     ])
 
     for _, r in aggregate_rankings_df.iterrows():
-        hl_str = "∞" if (np.isinf(r["median_half_life"]) or r["median_half_life"] > 9999) else f"{r['median_half_life']:.1f}d"
+        hl_str = format_half_life(r["median_half_life"])
         lines.append(
             f"| {int(r['rank'])} | {r['ticker']} | **{r['agg_two_pillar']:.1f}** | {r['agg_additive']:.1f} | "
             f"{r['agg_q_mr']:.3f} | {r['mean_daily_sd'] * 100:.2f}% | {r['mean_hurst']:.3f} | {hl_str} |"
@@ -311,9 +295,10 @@ def run_pipeline(config: PipelineConfig | None = None) -> PipelineResult:
             scoring_config=cfg.scoring_config,
         )
 
-    # Step 7: Export files to disk
+    # Step 7: Export files to disk (CSV and optional JSON)
     saved_files: dict[str, Path] = {}
 
+    # CSV Exports
     metric_file = reports_dir / cfg.metric_matrix_filename
     metric_matrix_df.to_csv(metric_file, index=False, float_format="%.6f")
     saved_files["metric_matrix"] = metric_file
@@ -326,6 +311,37 @@ def run_pipeline(config: PipelineConfig | None = None) -> PipelineResult:
     aggregate_rankings_df.to_csv(rankings_file, index=False, float_format="%.6f")
     saved_files["aggregate_rankings"] = rankings_file
 
+    # Optional JSON Exports
+    if cfg.export_json:
+        metric_json = reports_dir / Path(cfg.metric_matrix_filename).with_suffix(".json").name
+        metric_matrix_df.to_json(metric_json, orient="records", indent=2)
+        saved_files["metric_matrix_json"] = metric_json
+
+        scores_json = reports_dir / Path(cfg.candidate_scores_filename).with_suffix(".json").name
+        candidate_scores_df.to_json(scores_json, orient="records", indent=2)
+        saved_files["candidate_scores_json"] = scores_json
+
+        rankings_json = reports_dir / Path(cfg.aggregate_rankings_filename).with_suffix(".json").name
+        aggregate_rankings_df.to_json(rankings_json, orient="records", indent=2)
+        saved_files["aggregate_rankings_json"] = rankings_json
+
+        allocations_json = reports_dir / cfg.allocations_filename
+        allocations_data = {
+            t: {
+                "ticker": e.ticker,
+                "lane": e.lane.value,
+                "role": e.role.value,
+                "is_regime_consistent": e.is_regime_consistent,
+                "verdict": e.verdict,
+                "rationale": e.rationale,
+                "risk_flag": e.risk_flag,
+            }
+            for t, e in regime_allocations.items()
+        }
+        allocations_json.write_text(json.dumps(allocations_data, indent=2), encoding="utf-8")
+        saved_files["regime_allocations_json"] = allocations_json
+
+    # Markdown Report Export
     if cfg.generate_markdown and markdown_report:
         report_file = reports_dir / cfg.report_filename
         report_file.write_text(markdown_report, encoding="utf-8")

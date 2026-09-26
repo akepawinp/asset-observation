@@ -12,13 +12,14 @@ import numpy as np
 import pandas as pd
 
 from src.cli import (
+    _build_scoring_config,
     build_parser,
     format_aggregate_rankings_table,
     format_lane_allocations_table,
     format_metric_matrix_table,
     main,
 )
-from src.metrics import CANDIDATE_TICKERS, LOOKBACKS
+from src.metrics import CANDIDATE_TICKERS, LOOKBACKS, format_half_life
 from src.pipeline import PipelineConfig, run_pipeline
 from src.scoring import DeploymentLane, LaneRole, RegimeEvaluation, ScoringConfig
 
@@ -55,6 +56,7 @@ class TestCLIParser(unittest.TestCase):
         self.assertEqual(args.w_3y, 0.50)
         self.assertEqual(args.w_5y, 0.20)
         self.assertFalse(args.fetch_fresh)
+        self.assertFalse(args.export_json)
         self.assertTrue(args.generate_markdown)
 
     def test_parse_run_custom_arguments(self):
@@ -74,6 +76,7 @@ class TestCLIParser(unittest.TestCase):
             "--w-3y", "0.60",
             "--w-5y", "0.00",
             "--fetch-fresh",
+            "--json",
             "--no-markdown",
         ])
         self.assertEqual(args.tickers, ["CL=F", "BZ=F"])
@@ -86,11 +89,20 @@ class TestCLIParser(unittest.TestCase):
         self.assertEqual(args.ref_sd, 0.025)
         self.assertEqual(args.max_vol_score, 200.0)
         self.assertEqual(args.tau_hl, 60.0)
-        self.assertEqual(args.w_1y, 0.40)
-        self.assertEqual(args.w_3y, 0.60)
-        self.assertEqual(args.w_5y, 0.00)
         self.assertTrue(args.fetch_fresh)
+        self.assertTrue(args.export_json)
         self.assertFalse(args.generate_markdown)
+
+    def test_build_scoring_config_adjusts_lookbacks(self):
+        args = self.parser.parse_args(["run", "--lookbacks", "1Y", "3Y"])
+        config = _build_scoring_config(args, lookbacks=["1Y", "3Y"])
+        self.assertIn("1Y", config.horizon_weights)
+        self.assertIn("3Y", config.horizon_weights)
+        self.assertNotIn("5Y", config.horizon_weights)
+        # Verify weights re-normalized to 1.0
+        self.assertAlmostEqual(sum(config.horizon_weights.values()), 1.0)
+        self.assertAlmostEqual(config.horizon_weights["1Y"], 0.30 / 0.80)
+        self.assertAlmostEqual(config.horizon_weights["3Y"], 0.50 / 0.80)
 
     def test_parse_fetch_arguments(self):
         args = self.parser.parse_args([
@@ -114,12 +126,14 @@ class TestCLIParser(unittest.TestCase):
             "--lookbacks", "1Y",
             "--data-dir", "custom_data",
             "--output", "custom_reports/metrics.csv",
+            "--json",
         ])
         self.assertEqual(args.command, "metrics")
         self.assertEqual(args.tickers, ["BTC-USD"])
         self.assertEqual(args.lookbacks, ["1Y"])
         self.assertEqual(args.data_dir, Path("custom_data"))
         self.assertEqual(args.output, Path("custom_reports/metrics.csv"))
+        self.assertTrue(args.export_json)
 
     def test_parse_score_arguments(self):
         args = self.parser.parse_args([
@@ -130,12 +144,14 @@ class TestCLIParser(unittest.TestCase):
             "--w-hurst", "0.45",
             "--w-half-life", "0.40",
             "--w-adf", "0.15",
+            "--json",
         ])
         self.assertEqual(args.command, "score")
         self.assertEqual(args.input, Path("my_metrics.csv"))
         self.assertEqual(args.output, Path("my_scores.csv"))
         self.assertEqual(args.agg_output, Path("my_agg.csv"))
         self.assertEqual(args.w_hurst, 0.45)
+        self.assertTrue(args.export_json)
 
 
 class TestCLIFlowAndTables(unittest.TestCase):
@@ -166,13 +182,20 @@ class TestCLIFlowAndTables(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_format_half_life_helper(self):
+        self.assertEqual(format_half_life(float("nan")), "∞")
+        self.assertEqual(format_half_life(float("inf")), "∞")
+        self.assertEqual(format_half_life(10000.0), "∞")
+        self.assertEqual(format_half_life(-5.0), "∞")
+        self.assertEqual(format_half_life(45.67), "45.7d")
+
     def test_main_no_args_shows_help(self):
         with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
             exit_code = main([])
             self.assertEqual(exit_code, 0)
             self.assertIn("usage:", mock_out.getvalue())
 
-    def test_main_run_end_to_end(self):
+    def test_main_run_end_to_end_with_json(self):
         with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
             exit_code = main([
                 "run",
@@ -180,9 +203,7 @@ class TestCLIFlowAndTables(unittest.TestCase):
                 "--lookbacks", "1Y", "3Y",
                 "--data-dir", str(self.data_dir),
                 "--reports-dir", str(self.reports_dir),
-                "--w-1y", "0.40",
-                "--w-3y", "0.60",
-                "--w-5y", "0.00",
+                "--json",
             ])
             self.assertEqual(exit_code, 0)
             output = mock_out.getvalue()
@@ -194,11 +215,15 @@ class TestCLIFlowAndTables(unittest.TestCase):
             self.assertIn("TEST-B", output)
             self.assertIn("Output artifacts saved to:", output)
 
-            # Verify files created on disk
+            # Verify CSV & JSON files created on disk
             self.assertTrue((self.reports_dir / "metric_matrix.csv").exists())
             self.assertTrue((self.reports_dir / "candidate_scores.csv").exists())
             self.assertTrue((self.reports_dir / "aggregate_rankings.csv").exists())
             self.assertTrue((self.reports_dir / "final_asset_selection_report.md").exists())
+            self.assertTrue((self.reports_dir / "metric_matrix.json").exists())
+            self.assertTrue((self.reports_dir / "candidate_scores.json").exists())
+            self.assertTrue((self.reports_dir / "aggregate_rankings.json").exists())
+            self.assertTrue((self.reports_dir / "regime_allocations.json").exists())
 
     def test_main_run_invalid_weights_error(self):
         with patch("sys.stderr", new_callable=io.StringIO) as mock_err:
@@ -228,7 +253,7 @@ class TestCLIFlowAndTables(unittest.TestCase):
             output = mock_out.getvalue()
             self.assertIn("Successfully saved", output)
 
-    def test_main_metrics_command(self):
+    def test_main_metrics_command_with_json(self):
         with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
             metrics_out = self.reports_dir / "custom_metrics.csv"
             exit_code = main([
@@ -237,13 +262,15 @@ class TestCLIFlowAndTables(unittest.TestCase):
                 "--lookbacks", "1Y",
                 "--data-dir", str(self.data_dir),
                 "--output", str(metrics_out),
+                "--json",
             ])
             self.assertEqual(exit_code, 0)
             self.assertTrue(metrics_out.exists())
+            self.assertTrue(metrics_out.with_suffix(".json").exists())
             output = mock_out.getvalue()
             self.assertIn("METRIC MATRIX", output)
 
-    def test_main_score_command(self):
+    def test_main_score_command_with_json(self):
         # Generate metric matrix first
         cfg = PipelineConfig(
             tickers=["TEST-A", "TEST-B"],
@@ -260,13 +287,13 @@ class TestCLIFlowAndTables(unittest.TestCase):
                 "--input", str(self.reports_dir / "metric_matrix.csv"),
                 "--output", str(self.reports_dir / "scored.csv"),
                 "--agg-output", str(self.reports_dir / "agg.csv"),
-                "--w-1y", "0.5",
-                "--w-3y", "0.5",
-                "--w-5y", "0.0",
+                "--json",
             ])
             self.assertEqual(exit_code, 0)
             self.assertTrue((self.reports_dir / "scored.csv").exists())
             self.assertTrue((self.reports_dir / "agg.csv").exists())
+            self.assertTrue((self.reports_dir / "scored.json").exists())
+            self.assertTrue((self.reports_dir / "agg.json").exists())
             output = mock_out.getvalue()
             self.assertIn("MULTI-HORIZON AGGREGATE RANKINGS", output)
 

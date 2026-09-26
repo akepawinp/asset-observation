@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,7 @@ class TestPipeline(unittest.TestCase):
             scoring_config=ScoringConfig(
                 horizon_weights={"1Y": 0.40, "3Y": 0.60}
             ),
+            export_json=True,
         )
 
         result: PipelineResult = run_pipeline(config)
@@ -91,16 +93,30 @@ class TestPipeline(unittest.TestCase):
         self.assertIn("TEST-A", result.regime_allocations)
         self.assertIn("TEST-B", result.regime_allocations)
 
-        # Check generated files on disk
+        # Check generated files on disk (CSV + JSON)
         metric_file = self.reports_dir / "metric_matrix.csv"
         scores_file = self.reports_dir / "candidate_scores.csv"
         rankings_file = self.reports_dir / "aggregate_rankings.csv"
         report_file = self.reports_dir / "final_asset_selection_report.md"
+        metric_json = self.reports_dir / "metric_matrix.json"
+        scores_json = self.reports_dir / "candidate_scores.json"
+        rankings_json = self.reports_dir / "aggregate_rankings.json"
+        alloc_json = self.reports_dir / "regime_allocations.json"
 
         self.assertTrue(metric_file.exists())
         self.assertTrue(scores_file.exists())
         self.assertTrue(rankings_file.exists())
         self.assertTrue(report_file.exists())
+        self.assertTrue(metric_json.exists())
+        self.assertTrue(scores_json.exists())
+        self.assertTrue(rankings_json.exists())
+        self.assertTrue(alloc_json.exists())
+
+        # Validate JSON contents
+        with open(alloc_json, encoding="utf-8") as f:
+            alloc_data = json.load(f)
+            self.assertIn("TEST-A", alloc_data)
+            self.assertIn("lane", alloc_data["TEST-A"])
 
         # Validate CSV contents
         df_metrics = pd.read_csv(metric_file)
@@ -142,7 +158,6 @@ class TestPipeline(unittest.TestCase):
         self.assertIn("markdown_report", result.saved_files)
         for path in result.saved_files.values():
             self.assertTrue(path.exists())
-
 
     def test_invalid_scoring_weights_raises(self):
         config = PipelineConfig(

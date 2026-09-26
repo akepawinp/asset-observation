@@ -10,16 +10,22 @@ Provides a unified command-line tool supporting:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
 
 from src.downloader import fetch_and_save_tickers
-from src.metrics import CANDIDATE_TICKERS, LOOKBACKS, compute_all
+from src.metrics import (
+    CANDIDATE_TICKERS,
+    LOOKBACKS,
+    compute_all,
+    format_half_life,
+)
 from src.pipeline import (
     PipelineConfig,
     PipelineResult,
@@ -58,9 +64,7 @@ def format_metric_matrix_table(df: pd.DataFrame) -> str:
     disp["daily_sd"] = (disp["daily_sd"] * 100).map("{:.2f}%".format)
     disp["annual_sd"] = (disp["annual_sd"] * 100).map("{:.1f}%".format)
     disp["hurst"] = disp["hurst"].map("{:.3f}".format)
-    disp["half_life"] = disp["half_life"].apply(
-        lambda x: "∞" if (np.isinf(x) or x > 9999) else f"{x:.1f}d"
-    )
+    disp["half_life"] = disp["half_life"].apply(format_half_life)
     disp["adf_pvalue"] = disp["adf_pvalue"].map("{:.3f}".format)
 
     cols = ["ticker", "lookback", "daily_sd", "annual_sd", "hurst", "half_life", "adf_pvalue"]
@@ -89,9 +93,7 @@ def format_candidate_scores_table(df: pd.DataFrame, lookback: str | None = None)
     disp = sub_df.copy().sort_values(by="score_two_pillar", ascending=False)
     disp["daily_sd"] = (disp["daily_sd"] * 100).map("{:.2f}%".format)
     disp["hurst"] = disp["hurst"].map("{:.3f}".format)
-    disp["half_life"] = disp["half_life"].apply(
-        lambda x: "∞" if (np.isinf(x) or x > 9999) else f"{x:.1f}d"
-    )
+    disp["half_life"] = disp["half_life"].apply(format_half_life)
     disp["q_mr"] = disp["q_mr"].map("{:.3f}".format)
     disp["score_two_pillar"] = disp["score_two_pillar"].map("{:.1f}".format)
     disp["score_additive"] = disp["score_additive"].map("{:.1f}".format)
@@ -130,9 +132,7 @@ def format_aggregate_rankings_table(df: pd.DataFrame) -> str:
     disp["agg_q_mr"] = disp["agg_q_mr"].map("{:.3f}".format)
     disp["mean_daily_sd"] = (disp["mean_daily_sd"] * 100).map("{:.2f}%".format)
     disp["mean_hurst"] = disp["mean_hurst"].map("{:.3f}".format)
-    disp["median_half_life"] = disp["median_half_life"].apply(
-        lambda x: "∞" if (np.isinf(x) or x > 9999) else f"{x:.1f}d"
-    )
+    disp["median_half_life"] = disp["median_half_life"].apply(format_half_life)
 
     cols = [
         "rank",
@@ -174,6 +174,55 @@ def format_lane_allocations_table(allocations: dict[str, RegimeEvaluation]) -> s
     alloc_df = pd.DataFrame(rows)
     lines.append(alloc_df.to_string(index=False))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# ScoringConfig Builder Helper
+# ---------------------------------------------------------------------------
+
+def _build_scoring_config(
+    args: argparse.Namespace,
+    lookbacks: Sequence[str] | None = None,
+) -> ScoringConfig:
+    """Build and validate ScoringConfig from CLI args, aligning horizon weights with active lookbacks."""
+    active_lbs = list(lookbacks) if lookbacks is not None else list(LOOKBACKS)
+    
+    # Check if user explicitly provided horizon weights
+    w_1y = getattr(args, "w_1y", None)
+    w_3y = getattr(args, "w_3y", None)
+    w_5y = getattr(args, "w_5y", None)
+
+    horizon_weights: dict[str, float] = {}
+
+    # If user provided specific weights, respect them for active lookbacks
+    raw_weights = {"1Y": w_1y, "3Y": w_3y, "5Y": w_5y}
+    filtered_weights = {lb: w for lb, w in raw_weights.items() if lb in active_lbs and w is not None and w > 0}
+
+    if filtered_weights:
+        total_w = sum(filtered_weights.values())
+        if total_w > 0:
+            # Re-normalize if sum is not exactly 1.0 due to subsetting lookbacks
+            horizon_weights = {lb: w / total_w for lb, w in filtered_weights.items()}
+    else:
+        # Default equal or standard weights across active lookbacks
+        std_weights = {"1Y": 0.30, "3Y": 0.50, "5Y": 0.20}
+        active_std = {lb: std_weights.get(lb, 1.0 / len(active_lbs)) for lb in active_lbs}
+        total_std = sum(active_std.values())
+        horizon_weights = {lb: w / total_std for lb, w in active_std.items()}
+
+    config = ScoringConfig(
+        w_hurst=args.w_hurst,
+        w_half_life=args.w_half_life,
+        w_adf=args.w_adf,
+        ref_sd=args.ref_sd,
+        max_vol_score=args.max_vol_score,
+        h_opt=args.h_opt,
+        h_max=args.h_max,
+        tau_half_life=args.tau_hl,
+        horizon_weights=horizon_weights,
+    )
+    config.validate()
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="reports_dir",
         type=Path,
         default=Path("reports"),
-        help="Output directory for CSVs and Markdown reports (default: reports).",
+        help="Output directory for CSVs, JSON, and Markdown reports (default: reports).",
     )
     run_parser.add_argument(
         "--fetch",
@@ -326,6 +375,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-full",
         action="store_true",
         help="Force full re-download of price data without incremental merge.",
+    )
+    run_parser.add_argument(
+        "--json",
+        "--export-json",
+        dest="export_json",
+        action="store_true",
+        help="Export machine-readable JSON files alongside CSVs.",
     )
     run_parser.add_argument(
         "--no-markdown",
@@ -422,6 +478,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("reports/metric_matrix.csv"),
         help="Output CSV path for metric matrix (default: reports/metric_matrix.csv).",
     )
+    metrics_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="export_json",
+        help="Export JSON format alongside CSV.",
+    )
 
     # 4. Scoring and ranking ('score')
     score_parser = subparsers.add_parser(
@@ -449,6 +511,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("reports/aggregate_rankings.csv"),
         help="Output CSV path for aggregate rankings (default: reports/aggregate_rankings.csv).",
     )
+    score_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="export_json",
+        help="Export JSON format alongside CSV.",
+    )
     _add_scoring_weight_arguments(score_parser)
 
     return parser
@@ -460,27 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def handle_run(args: argparse.Namespace) -> int:
     """Handle 'run' subcommand executing the full analysis pipeline."""
-    # Build horizon weights dictionary
-    horizon_weights = {}
-    if args.w_1y > 0:
-        horizon_weights["1Y"] = args.w_1y
-    if args.w_3y > 0:
-        horizon_weights["3Y"] = args.w_3y
-    if args.w_5y > 0:
-        horizon_weights["5Y"] = args.w_5y
-
-    scoring_config = ScoringConfig(
-        w_hurst=args.w_hurst,
-        w_half_life=args.w_half_life,
-        w_adf=args.w_adf,
-        ref_sd=args.ref_sd,
-        max_vol_score=args.max_vol_score,
-        h_opt=args.h_opt,
-        h_max=args.h_max,
-        tau_half_life=args.tau_hl,
-        horizon_weights=horizon_weights,
-    )
-    scoring_config.validate()
+    scoring_config = _build_scoring_config(args, lookbacks=args.lookbacks)
 
     pipeline_config = PipelineConfig(
         tickers=args.tickers,
@@ -493,6 +541,7 @@ def handle_run(args: argparse.Namespace) -> int:
         end_date=args.end,
         force_full_download=args.force_full,
         generate_markdown=args.generate_markdown,
+        export_json=args.export_json,
     )
 
     result: PipelineResult = run_pipeline(pipeline_config)
@@ -547,6 +596,11 @@ def handle_metrics(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False, float_format="%.6f")
 
+    if getattr(args, "export_json", False):
+        json_path = out_path.with_suffix(".json")
+        df.to_json(json_path, orient="records", indent=2)
+        print(f"Saved metric matrix JSON to: {json_path}")
+
     print("\n" + format_metric_matrix_table(df))
     print(f"\nSaved metric matrix to: {out_path}")
     return 0
@@ -558,28 +612,10 @@ def handle_score(args: argparse.Namespace) -> int:
     if not in_path.exists():
         raise FileNotFoundError(f"Input metric matrix file '{in_path}' does not exist.")
 
-    horizon_weights = {}
-    if args.w_1y > 0:
-        horizon_weights["1Y"] = args.w_1y
-    if args.w_3y > 0:
-        horizon_weights["3Y"] = args.w_3y
-    if args.w_5y > 0:
-        horizon_weights["5Y"] = args.w_5y
-
-    config = ScoringConfig(
-        w_hurst=args.w_hurst,
-        w_half_life=args.w_half_life,
-        w_adf=args.w_adf,
-        ref_sd=args.ref_sd,
-        max_vol_score=args.max_vol_score,
-        h_opt=args.h_opt,
-        h_max=args.h_max,
-        tau_half_life=args.tau_hl,
-        horizon_weights=horizon_weights,
-    )
-    config.validate()
-
     df = pd.read_csv(in_path)
+    available_lookbacks = df["lookback"].unique() if "lookback" in df.columns else list(LOOKBACKS)
+    config = _build_scoring_config(args, lookbacks=available_lookbacks)
+
     scored = evaluate_candidate_models(df, config=config)
     agg = compute_aggregate_rankings(scored, config=config)
     allocations = allocate_deployment_lanes(df, config=config)
@@ -592,11 +628,31 @@ def handle_score(args: argparse.Namespace) -> int:
     agg_path.parent.mkdir(parents=True, exist_ok=True)
     agg.to_csv(agg_path, index=False, float_format="%.6f")
 
+    if getattr(args, "export_json", False):
+        scored_json = out_path.with_suffix(".json")
+        scored.to_json(scored_json, orient="records", indent=2)
+        agg_json = agg_path.with_suffix(".json")
+        agg.to_json(agg_json, orient="records", indent=2)
+        print(f"Saved candidate scores JSON to: {scored_json}")
+        print(f"Saved aggregate rankings JSON to: {agg_json}")
+
     print("\n" + format_aggregate_rankings_table(agg))
     print("\n" + format_lane_allocations_table(allocations))
     print(f"\nSaved candidate scores to: {out_path}")
     print(f"Saved aggregate rankings to: {agg_path}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Command Dispatch Table
+# ---------------------------------------------------------------------------
+
+_COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "run": handle_run,
+    "fetch": handle_fetch,
+    "metrics": handle_metrics,
+    "score": handle_score,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -618,18 +674,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    handler = _COMMAND_HANDLERS.get(args.command)
+    if not handler:
+        parser.print_help()
+        return 0
+
     try:
-        if args.command == "run":
-            return handle_run(args)
-        elif args.command == "fetch":
-            return handle_fetch(args)
-        elif args.command == "metrics":
-            return handle_metrics(args)
-        elif args.command == "score":
-            return handle_score(args)
-        else:
-            parser.print_help()
-            return 0
+        return handler(args)
     except Exception as exc:
         if getattr(args, "verbose", False):
             logger.exception("CLI execution failed: %s", exc)
